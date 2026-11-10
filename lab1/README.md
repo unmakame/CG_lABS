@@ -5,7 +5,7 @@
 ## Запуск
 
 ```sh
-cd ~/Desktop/CG_lABS
+cd ~/Desktop/CG
 zsh lab1/run.sh
 ```
 

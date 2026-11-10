@@ -5,3 +5,7 @@ imgui.ini
 *.log
 .vscode/
 .idea/
+
+# Original handouts and lecture notes retained locally
+*.pdf
+docs/
