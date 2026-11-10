@@ -2,6 +2,7 @@
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include "imgui.h"
+#include "scene_math.hpp"
 #include "sphere_mesh.hpp"
 #include "stb_image.h"
 #include <GLFW/glfw3.h>
@@ -88,6 +89,7 @@ struct ModelState {
   glm::vec3 specular{1};
   float power = 48;
   int texture = 0;
+  double phase = 0;
   bool animate = true;
   bool animatedSampling = false;
 };
@@ -121,8 +123,12 @@ class SceneRenderer {
   bool showGrid_ = CG_LAB_STAGE == 1;
   bool directionalEnabled_ = true, textureAnimationPlaying_ = true;
   glm::vec3 ambient_{0.13f, 0.15f, 0.19f};
-  float textureTime_ = 0.0f, time_ = 0.0f, animationSpeed_ = 0.8f,
-        orbitRadius_ = 0.8f;
+  double textureTime_ = 0;
+  float animationSpeed_ = .8f, orbitRadius_ = .8f;
+  int selectedModel_ = 0;
+  bool showNormals_ = false, showCones_ = true;
+  float normalLength_ = .18f, coneLength_ = .6f;
+  double lastDt_ = 0;
   glm::vec3 directionalDirection_{-0.5f, -1.0f, -0.4f},
       directionalColor_{1.0f, 0.94f, 0.82f};
   float directionalIntensity_ = 0.7f;
@@ -212,6 +218,18 @@ class SceneRenderer {
     auto cmd = beginUpload();
     VkBufferCopy copy{0, 0, size};
     vkCmdCopyBuffer(cmd, staging.handle, dst.handle, 1, &copy);
+    VkBufferMemoryBarrier ready{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    ready.dstAccessMask = finalUsage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                              ? VK_ACCESS_INDEX_READ_BIT
+                              : VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    ready.srcQueueFamilyIndex = ready.dstQueueFamilyIndex =
+        VK_QUEUE_FAMILY_IGNORED;
+    ready.buffer = dst.handle;
+    ready.size = size;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1,
+                         &ready, 0, nullptr);
     endUpload(cmd);
     freeBuffer(staging);
   }
@@ -340,22 +358,10 @@ class SceneRenderer {
     return proj * view;
   }
   glm::mat4 modelMatrix(const ModelState &m, std::size_t index) const {
-    glm::vec3 p = m.position;
-    if (m.animate) {
-      float a = time_ + (float)index * 2.094f;
-      float base = (float)index * 2.094f;
-      p.x += orbitRadius_ * (std::cos(a) - std::cos(base));
-      p.z += orbitRadius_ * (std::sin(a) - std::sin(base));
-      p.y += 0.3f * orbitRadius_ * (std::sin(2 * a) - std::sin(2 * base));
-    }
-    glm::mat4 mat = glm::translate(glm::mat4(1), p);
-    mat = glm::rotate(mat, glm::radians(m.rotation.x), {1, 0, 0});
-    mat = glm::rotate(mat,
-                      glm::radians(m.rotation.y) + (m.animate ? time_ : 0.0f),
-                      {0, 1, 0});
-    mat = glm::rotate(mat, glm::radians(m.rotation.z), {0, 0, 1});
-    return glm::scale(mat, glm::max(m.scale, glm::vec3(0.01f)));
+    return sphereTransform(m.position, m.rotation, m.scale, m.phase, index,
+                           orbitRadius_);
   }
+
   void createDescriptors() {
     std::array<VkDescriptorSetLayoutBinding, 3> sb{};
     sb[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
@@ -667,14 +673,100 @@ public:
       spots_.clear();
     }
   }
-  void Update(float dt, int w, int h) {
-    vkQueueWaitIdle(queue_);
-    float step = std::max(0.0f, std::min(dt, 0.05f));
-    if (animationPlaying_)
-      time_ += step * animationSpeed_;
-    if (textureAnimationPlaying_)
-      textureTime_ += step;
+  void HandleInput(double dt) {
+    auto &io = ImGui::GetIO();
+    selectedModel_ = std::clamp(selectedModel_, 0, int(models_.size()) - 1);
+    const bool inScene = io.MousePos.x >= io.DisplaySize.x * .28f &&
+                         io.MousePos.x < io.DisplaySize.x &&
+                         io.MousePos.y >= 0 && io.MousePos.y < io.DisplaySize.y;
+    auto forward = cameraForward();
+    auto right = glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
+    auto up = glm::normalize(glm::cross(right, forward));
+    if (inScene && !io.WantCaptureMouse) {
+      if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
+        cameraYaw_ += io.MouseDelta.x * .005f;
+        cameraPitch_ =
+            std::clamp(cameraPitch_ - io.MouseDelta.y * .005f, -1.5f, 1.5f);
+      }
+      cameraEye_ += forward * io.MouseWheel * .35f;
+      if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+          !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        auto &model = models_[selectedModel_];
+        float depth = std::max(
+            .1f, glm::dot(glm::vec3(modelMatrix(model, selectedModel_)[3]) -
+                              cameraEye_,
+                          forward));
+        float units =
+            (perspective_
+                 ? 2 * depth * std::tan(glm::radians(fovDegrees_) * .5f)
+                 : 5.2f) /
+            std::max(io.DisplaySize.y, 1.0f);
+        model.position +=
+            units * (right * io.MouseDelta.x - up * io.MouseDelta.y);
+      }
+    }
+    if (!io.WantCaptureKeyboard && !io.WantTextInput) {
+      glm::vec3 movement(0);
+      if (ImGui::IsKeyDown(ImGuiKey_W))
+        movement += forward;
+      if (ImGui::IsKeyDown(ImGuiKey_S))
+        movement -= forward;
+      if (ImGui::IsKeyDown(ImGuiKey_D))
+        movement += right;
+      if (ImGui::IsKeyDown(ImGuiKey_A))
+        movement -= right;
+      if (ImGui::IsKeyDown(ImGuiKey_E))
+        movement.y += 1;
+      if (ImGui::IsKeyDown(ImGuiKey_Q))
+        movement.y -= 1;
+      if (glm::dot(movement, movement) > 0)
+        cameraEye_ += glm::normalize(movement) * float(frameSeconds(dt)) *
+                      (io.KeyShift ? 7.5f : 2.5f);
+      if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
+        animationPlaying_ = !animationPlaying_;
+    }
+  }
+  void Update(double dt, int w, int h) {
+    check(vkQueueWaitIdle(queue_),
+          "wait before updating shared uniform buffers");
+    lastDt_ = frameSeconds(dt);
+    for (auto &m : models_)
+      advancePhase(m.phase, lastDt_, animationSpeed_,
+                   animationPlaying_ && m.animate);
+    advancePhase(textureTime_, lastDt_, 1, textureAnimationPlaying_);
     updateGpuData(w, h);
+  }
+  void DrawNormalOverlay() {
+    if (!showNormals_)
+      return;
+    auto size = ImGui::GetIO().DisplaySize;
+    auto vp = viewProjection(int(size.x), int(size.y));
+    auto project = [&](glm::vec3 p, ImVec2 &out) {
+      auto c = vp * glm::vec4(p, 1);
+      if (c.w <= 0 || c.z < 0 || c.z > c.w)
+        return false;
+      out = {size.x * .28f + (c.x / c.w * .5f + .5f) * size.x * .72f,
+             (c.y / c.w * .5f + .5f) * size.y};
+      return true;
+    };
+    auto *lines = ImGui::GetBackgroundDrawList();
+    lines->PushClipRect({size.x * .28f, 0}, size, true);
+    for (size_t i = 0; i < models_.size(); ++i) {
+      auto m = modelMatrix(models_[i], i);
+      auto normal = glm::transpose(glm::inverse(glm::mat3(m)));
+      for (const auto &v : mesh_.vertices) {
+        auto p = glm::vec3(
+            m * glm::vec4(v.position[0], v.position[1], v.position[2], 1));
+        auto n = glm::normalize(
+            normal * glm::vec3(v.normal[0], v.normal[1], v.normal[2]));
+        if (glm::dot(n, cameraEye_ - p) <= 0)
+          continue;
+        ImVec2 a, b;
+        if (project(p, a) && project(p + n * normalLength_, b))
+          lines->AddLine(a, b, IM_COL32(70, 235, 160, 220));
+      }
+    }
+    lines->PopClipRect();
   }
   void RecordBeforePass(VkCommandBuffer cmd, int w, int h) {
     (void)cmd;
@@ -710,7 +802,7 @@ public:
                                draws[i].texture % 2];
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               pipelineLayout_, 1, 1, &set, 1, &dyn);
-      MaterialPush pc{textureTime_,
+      MaterialPush pc{float(textureTime_),
                       (CG_LAB_STAGE == 3 && animateUV_ && i < models_.size() &&
                        models_[i].animatedSampling)
                           ? 1u
@@ -734,6 +826,26 @@ public:
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoCollapse);
     ImGui::Text("Vulkan sphere | 117 vertices | 12 x 8 segments");
+    ImGui::TextWrapped("Drag LMB: selected sphere | RMB: look | Wheel: move "
+                       "camera | WASD + Q/E: camera | Space: pause");
+    if (ImGui::BeginCombo(
+            "Selected sphere",
+            ("Sphere " + std::to_string(selectedModel_ + 1)).c_str())) {
+      for (int i = 0; i < int(models_.size()); ++i)
+        if (ImGui::Selectable(("Sphere " + std::to_string(i + 1)).c_str(),
+                              i == selectedModel_))
+          selectedModel_ = i;
+      ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Focus selected")) {
+      glm::vec3 target =
+          glm::vec3(modelMatrix(models_[selectedModel_], selectedModel_)[3]);
+      cameraEye_ = target - cameraForward() * 5.0f;
+    }
+    ImGui::Checkbox("Show surface normals (green)", &showNormals_);
+    if (showNormals_)
+      ImGui::SliderFloat("Normal length", &normalLength_, .05f, .4f);
     ImGui::Separator();
     if (ImGui::CollapsingHeader("Projection and camera",
                                 ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -742,8 +854,8 @@ public:
       ImGui::RadioButton("Orthographic", &projectionRadio_, 1);
       perspective_ = projectionRadio_ == 0;
       ImGui::SliderFloat("FOV", &fovDegrees_, 25, 100, "%.0f deg");
-      ImGui::SliderFloat("Camera yaw", &cameraYaw_, -3.14f, 3.14f);
-      ImGui::SliderFloat("Camera pitch", &cameraPitch_, -1.2f, 1.2f);
+      ImGui::SliderAngle("Camera yaw", &cameraYaw_, -180, 180);
+      ImGui::SliderAngle("Camera pitch", &cameraPitch_, -85, 85);
       ImGui::DragFloat3("Camera position", glm::value_ptr(cameraEye_), .03f);
       if (ImGui::Button("Reset camera")) {
         cameraEye_ = {0, .5f, 7};
@@ -764,7 +876,14 @@ public:
       ImGui::SameLine();
       ImGui::Text("%d / %u", (int)models_.size(), MaxObjects);
       ImGui::Checkbox("Play animation", &animationPlaying_);
-      ImGui::SliderFloat("Animation speed", &animationSpeed_, 0, 3);
+      ImGui::SliderFloat("Animation speed (rad/s)", &animationSpeed_, 0, 3);
+      ImGui::Text("dt: %.4f s", lastDt_);
+      if (ImGui::Button("Reset animation")) {
+        for (auto &m : models_)
+          m.phase = 0;
+        textureTime_ = 0;
+      }
+
       ImGui::SliderFloat("Orbit radius", &orbitRadius_, 0, 2);
       if (CG_LAB_STAGE == 1) {
         ImGui::Checkbox("Procedural vertex color", &showVertexColor_);
@@ -772,7 +891,7 @@ public:
       }
       for (size_t i = 0; i < models_.size(); ++i) {
         std::string label = "Sphere " + std::to_string(i + 1);
-        if (ImGui::TreeNode(label.c_str())) {
+        if (ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
           ImGui::DragFloat3("Position", glm::value_ptr(models_[i].position),
                             .02f);
           ImGui::DragFloat3("Rotation", glm::value_ptr(models_[i].rotation),
@@ -792,9 +911,11 @@ public:
             ImGui::Checkbox("Animated sampling for this model",
                             &models_[i].animatedSampling);
           }
-          ImGui::Checkbox("Orbit this model", &models_[i].animate);
+          ImGui::Checkbox("Animate this sphere", &models_[i].animate);
           if (models_.size() > 1 && ImGui::Button("Remove model")) {
             models_.erase(models_.begin() + i);
+            selectedModel_ =
+                std::clamp(selectedModel_, 0, int(models_.size()) - 1);
             ImGui::TreePop();
             break;
           }
@@ -812,13 +933,15 @@ public:
       ImGui::SliderFloat("Directional intensity", &directionalIntensity_, 0, 4);
       ImGui::ColorEdit3("Ambient", glm::value_ptr(ambient_));
       ImGui::Checkbox("Show light markers", &showLightMarkers_);
+      ImGui::Checkbox("Show spotlight cones (white)", &showCones_);
+      ImGui::SliderFloat("Cone display length", &coneLength_, .1f, 1.5f);
     }
     if (ImGui::CollapsingHeader("Point lights (SSBO)")) {
       if (ImGui::Button("Add point light") && points_.size() < MaxPointLights)
         points_.push_back(PointLight{});
       for (size_t i = 0; i < points_.size(); ++i) {
         std::string label = "Point " + std::to_string(i + 1);
-        if (ImGui::TreeNode(label.c_str())) {
+        if (ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
           ImGui::DragFloat3("Position", glm::value_ptr(points_[i].position),
                             .03f);
           ImGui::ColorEdit3("Color", glm::value_ptr(points_[i].color));
@@ -837,7 +960,7 @@ public:
         spots_.push_back(SpotLight{});
       for (size_t i = 0; i < spots_.size(); ++i) {
         std::string label = "Spot " + std::to_string(i + 1);
-        if (ImGui::TreeNode(label.c_str())) {
+        if (ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
           ImGui::DragFloat3("Position", glm::value_ptr(spots_[i].position),
                             .03f);
           ImGui::DragFloat3("Direction", glm::value_ptr(spots_[i].direction),
@@ -872,7 +995,9 @@ public:
     ImGui::Text("Frame %.2f ms (%.0f FPS)", 1000.0f / ImGui::GetIO().Framerate,
                 ImGui::GetIO().Framerate);
     ImGui::End();
-    if (showLightMarkers_ && !spots_.empty()) {
+  }
+  void DrawOverlays() {
+    if (showLightMarkers_ && showCones_ && !spots_.empty()) {
       ImVec2 screen = ImGui::GetIO().DisplaySize;
       glm::mat4 vp = viewProjection((int)screen.x, (int)screen.y);
       auto project = [&](glm::vec3 p, ImVec2 &out) {
@@ -885,6 +1010,7 @@ public:
         return true;
       };
       ImDrawList *dl = ImGui::GetBackgroundDrawList();
+      dl->PushClipRect({screen.x * .28f, 0}, screen, true);
       for (const auto &l : spots_) {
         ImVec2 origin, tip;
         if (!project(l.position, origin) ||
@@ -902,12 +1028,12 @@ public:
             glm::cross(axis, glm::abs(axis.y) < .9f ? glm::vec3(0, 1, 0)
                                                     : glm::vec3(1, 0, 0)));
         glm::vec3 up = glm::normalize(glm::cross(axis, right));
-        float radius = std::tan(glm::radians(l.outerDegrees)) * 1.2f;
+        float radius = std::tan(glm::radians(l.outerDegrees)) * coneLength_;
         ImVec2 prev{};
         bool have = false;
         for (int k = 0; k <= 32; k++) {
           float a = 6.2831853f * k / 32.0f;
-          glm::vec3 q = l.position + axis * 1.2f +
+          glm::vec3 q = l.position + axis * coneLength_ +
                         radius * (std::cos(a) * right + std::sin(a) * up);
           ImVec2 cur;
           if (project(q, cur)) {
@@ -920,8 +1046,11 @@ public:
           }
         }
       }
+      dl->PopClipRect();
     }
+    DrawNormalOverlay();
   }
+
   void Shutdown() {
     if (device_)
       vkDeviceWaitIdle(device_);

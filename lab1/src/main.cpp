@@ -562,6 +562,7 @@ int main(int, char **) {
     }
     if (fb_width <= 0 || fb_height <= 0 ||
         glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0) {
+      previousTime = glfwGetTime();
       ImGui_ImplGlfw_Sleep(10);
       continue;
     }
@@ -572,10 +573,12 @@ int main(int, char **) {
     ImGui::NewFrame();
 
     const double currentTime = glfwGetTime();
-    const float dt = (float)(currentTime - previousTime);
+    const double dt = currentTime - previousTime;
     previousTime = currentTime;
-    g_Scene.Update(dt, g_MainWindowData.Width, g_MainWindowData.Height);
+    g_Scene.HandleInput(dt);
     g_Scene.DrawUi();
+    g_Scene.Update(dt, g_MainWindowData.Width, g_MainWindowData.Height);
+    g_Scene.DrawOverlays();
 
     // Rendering
     ImGui::Render();

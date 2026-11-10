@@ -84,7 +84,7 @@ void main() {
     for (uint i = 0; i < pointLights.count; ++i) {
         vec3 delta = pointLights.values[i].position.xyz - worldPosition;
         float distance2 = max(dot(delta, delta), 0.01);
-        vec3 L = delta * inversesqrt(max(dot(delta, delta), 0.01));
+        vec3 L = safeNormalize(delta);
         vec3 radiance = pointLights.values[i].colorIntensity.rgb *
                         pointLights.values[i].colorIntensity.a / distance2;
         lit += blinnPhong(N, V, L, radiance, albedo, specularMask,
@@ -95,7 +95,7 @@ void main() {
         SpotLight light = spotLights.values[i];
         vec3 delta = light.position.xyz - worldPosition;
         float distance2 = max(dot(delta, delta), 0.01);
-        vec3 L = delta * inversesqrt(max(dot(delta, delta), 0.01));
+        vec3 L = safeNormalize(delta);
         float theta = dot(safeNormalize(-L), safeNormalize(light.directionInnerCos.xyz));
         float cone = (light.directionInnerCos.w > light.outerCosAndPadding.x + 1e-6 ? smoothstep(light.outerCosAndPadding.x, light.directionInnerCos.w, theta) : step(light.outerCosAndPadding.x, theta));
         vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.a * cone / distance2;
