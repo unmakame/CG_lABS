@@ -8,20 +8,3 @@
 cd ~/Desktop/CG_lABS
 zsh lab3/run.sh
 ```
-
-Панель находится слева, сцена справа. Сразу показаны две сферы. Движение по умолчанию приостановлено. Камеру можно вернуть кнопкой Reset camera.
-
-## Соответствие заданию на оценку 5
-
-- **База: текстуры из файлов.** stb_image загружает PPM; UV генерируются вместе со сферой. Полноценное освещение из Lab 2 сохранено.
-- **Динамический UBO.** Единый modelBuffer_, stride выровнен по minUniformBufferOffsetAlignment; offset передаётся в vkCmdBindDescriptorSets.
-- **GPU-память.** Вершины, индексы и текстуры в DEVICE_LOCAL памяти, копируются через staging.
-- **1. Несколько материалов.** Sphere → Albedo texture: Earthlike / Marble. Два набора дескрипторов материалов используются всеми моделями.
-- **2. Нетривиальное сэмплирование.** Animated sampling for this model; Enable sampling effects; Play texture animation. По умолчанию эффект включён для первой сферы. Время и флаг передаются push constants; шейдер выполняет две выборки с разными UV и модуляцию цвета.
-- **3. Specular / emissive.** Earthlike использует карты блеска и свечения (Perlin). Marble использует чёрную заглушку 1×1 для обеих отсутствующих карт. Emissive прибавляется после Blinn–Phong.
-
-## Код и проверка
-
-`src/main.cpp` — окно и жизненный цикл Vulkan. `src/scene_renderer.hpp` — ресурсы, дескрипторы, камера, UI и команды отрисовки. `src/sphere_mesh.hpp` — геометрия. `shaders/` — GLSL. Общий Vulkan helper в `../third_party/imgui/backends` дополнен буфером глубины; папку third_party необходимо сохранять.
-
-Проверки: C++/GLSL сборка, spirv-val и CPU-проверка геометрии. Визуальная проверка всех действий и Vulkan validation на доступном GPU ещё не завершены; оценка преподавателя не гарантируется. Максимум 8 сфер и по 32 источника каждого типа в интерфейсе; shader SSBO arrays имеют runtime length.
