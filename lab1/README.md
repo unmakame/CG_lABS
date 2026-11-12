@@ -10,8 +10,3 @@ zsh lab1/run.sh
 ```
 
 
-## Код и проверка
-
-`src/main.cpp` — окно и жизненный цикл Vulkan. `src/scene_renderer.hpp` — ресурсы, дескрипторы, камера, UI и команды отрисовки. `src/sphere_mesh.hpp` — геометрия. `shaders/` — GLSL. Общий Vulkan helper в `../third_party/imgui/backends` дополнен буфером глубины; папку third_party необходимо сохранять.
-
-Проверки: C++/GLSL сборка, spirv-val и CPU-проверка геометрии. Визуальная проверка всех действий и Vulkan validation на доступном GPU ещё не завершены; оценка преподавателя не гарантируется. Максимум 8 сфер и по 32 источника каждого типа в интерфейсе; shader SSBO arrays имеют runtime length.
